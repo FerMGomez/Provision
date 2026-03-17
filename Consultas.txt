@@ -1,0 +1,5 @@
+
+A resolver:
+
+ 1 - Cajas reales por transporte -
+ 2 - Agregar la Ruta a cada Linea -  
