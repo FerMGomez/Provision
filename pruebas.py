@@ -95,6 +95,24 @@ def debug_print(*args, **kwargs):
         print(*args, **kwargs)
 
 
+def normalizar_transportista(valor):
+    """Normaliza nombres de transportistas y unifica aliases frecuentes."""
+    base = str(valor).strip().upper()
+    if not base or base == 'NAN':
+        return ''
+
+    base = ' '.join(base.split())
+    aliases = {
+        'LOGISCHER NEA S.A.': 'LOGISCHER NEA SA',
+        'LOS AMIGOS': 'TTES. LOS AMIGOS S.A.',
+        'LOS AMIGOS S.A.': 'TTES. LOS AMIGOS S.A.',
+        'TTES LOS AMIGOS S.A.': 'TTES. LOS AMIGOS S.A.',
+        'TTES. LOS AMIGOS SA': 'TTES. LOS AMIGOS S.A.',
+        'TRANSPORTES LOS AMIGOS S.A.': 'TTES. LOS AMIGOS S.A.',
+    }
+    return aliases.get(base, base)
+
+
 def coalesce_columns(df, target, candidates):
     """Consolida múltiples variantes de una columna en una sola columna canónica."""
     disponibles = [col for col in candidates if col in df.columns]
@@ -128,7 +146,7 @@ def preparar_columnas_transporte_viajes(df):
     else:
         transporte_alcance = ''
 
-    df['TRANSPORTE_ALCANCE'] = pd.Series(transporte_alcance, index=df.index).astype(str).str.strip().str.upper()
+    df['TRANSPORTE_ALCANCE'] = pd.Series(transporte_alcance, index=df.index).apply(normalizar_transportista)
 
     if 'TRANSPORTE_XD' in df.columns:
         transporte_xd = df['TRANSPORTE_XD'].where(df['TRANSPORTE_XD'].notna(), '')
@@ -143,7 +161,7 @@ def preparar_columnas_transporte_viajes(df):
     else:
         transporte_xd = pd.Series('', index=df.index, dtype='object')
 
-    df['TRANSPORTE_XD'] = pd.Series(transporte_xd, index=df.index).astype(str).str.strip().str.upper()
+    df['TRANSPORTE_XD'] = pd.Series(transporte_xd, index=df.index).apply(normalizar_transportista)
     return df
 
 
@@ -159,6 +177,7 @@ def clasificar_t_viaje_vectorizado(df):
     mask_unico = id_viaje.str.match(RE_UNICO) & tipo_viaje.eq('Simple')
     mask_alcance_expo = id_viaje.str.match(RE_ALCANCE_EXPO) & tipo_viaje.eq('Exportación')
     mask_alcance = id_viaje.str.match(RE_AR) & tipo_viaje.isin(['Alcance', 'Exportación'])
+    mask_alcance_simple = id_viaje.str.match(RE_AR) & tipo_viaje.eq('Simple')
     mask_retiro = id_viaje.str.match(RE_AR) & tipo_viaje.eq('Retiro')
     mask_distribucion = id_viaje.str.match(RE_UNICO) & tipo_viaje.eq('Distribución - Troncal')
 
@@ -167,6 +186,7 @@ def clasificar_t_viaje_vectorizado(df):
     resultado.loc[mask_unico] = 'Unico'
     resultado.loc[mask_alcance_expo] = 'Alcance_Expo'
     resultado.loc[mask_alcance] = 'Alcance'
+    resultado.loc[mask_alcance_simple] = 'Alcance'
     resultado.loc[mask_retiro] = 'Retiro'
     resultado.loc[mask_distribucion] = 'Distribución'
 
@@ -184,14 +204,14 @@ def preparar_tarifario_auxiliares(tarifario):
         var_name='UNIDAD_NORM',
         value_name='Tarifa_Base'
     )
-    tarifario_long['TRANSPORTE_NORM'] = tarifario_long['CARRIER'].astype(str).str.strip().str.upper()
+    tarifario_long['TRANSPORTE_NORM'] = tarifario_long['CARRIER'].apply(normalizar_transportista)
     tarifario_long['ZONE_KEY'] = tarifario_long['TRANSPORT ZONE'].astype(str).str.strip().str.upper()
     tarifario_long['UNIDAD_NORM'] = tarifario_long['UNIDAD_NORM'].astype(str).str.strip().str.upper()
 
     tarifario_dist = tarifario.rename(
         columns={'CARRIER': 'TRANSPORTE_NORM', 'TRANSPORT ZONE': 'ZONE_KEY'}
     ).copy()
-    tarifario_dist['TRANSPORTE_NORM'] = tarifario_dist['TRANSPORTE_NORM'].astype(str).str.strip().str.upper()
+    tarifario_dist['TRANSPORTE_NORM'] = tarifario_dist['TRANSPORTE_NORM'].apply(normalizar_transportista)
     tarifario_dist['ZONE_KEY'] = tarifario_dist['ZONE_KEY'].astype(str).str.strip().str.upper()
 
     zona_interior_ref = 'AR00BA1001'
@@ -415,10 +435,19 @@ def filtrar_billing_operativo(billing_df):
         ).astype(str).str.strip()
         billing = billing[accounting_doc != ''].copy()
 
-    if 'Ship to party' in billing.columns:
-        ship_to_exclude = {"3000021508", "1000078395", "1000078394", "1000078144"}
-        ship_to = billing['Ship to party'].where(billing['Ship to party'].notna(), '').astype(str).str.strip()
-        billing = billing[~ship_to.isin(ship_to_exclude)].copy()
+    # Excluir solo clientes no operativos requeridos por negocio para resumenes:
+    # - Rofina (en algunos archivos aparece como Reckitt Gran Barata)
+    # - Reckitt Samples
+    if 'Ship to party name' in billing.columns:
+        ship_to_name = billing['Ship to party name'].where(
+            billing['Ship to party name'].notna(), ''
+        ).astype(str).str.strip().str.upper()
+        mask_excluir = ship_to_name.str.contains(
+            r'ROFINA|GRAN BARATA|SAMPLES?',
+            regex=True,
+            na=False
+        )
+        billing = billing[~mask_excluir].copy()
 
     return billing
 
@@ -447,7 +476,7 @@ def asignar_tarifa_vectorizado(df_viajes, tarifario_aux):
 
     # --- 1. Normalización y Claves ---
     # El caller ya define qué transportista corresponde para cada cálculo.
-    df['TRANSPORTE_NORM'] = df['TRANSPORTE'].astype(str).str.strip().str.upper()
+    df['TRANSPORTE_NORM'] = df['TRANSPORTE'].apply(normalizar_transportista)
 
     df['TIPO_VIAJE_NORM'] = df['TIPO DE VIAJE'].astype(str).str.strip().str.upper()
     df['UNIDAD_NORM'] = df['UNIDAD'].astype(str).str.strip().str.upper()
@@ -492,7 +521,11 @@ def asignar_tarifa_vectorizado(df_viajes, tarifario_aux):
         debug_print(f"Después del merge de distribución: {df_dist_merged['Aforo x 900KG'].notna().sum()} / {len(df_dist_merged)} con aforo encontrado.")
 
         cond_andreani = df_dist_merged['TRANSPORTE_NORM'] == 'ANDREANI LOGISTICA S.A.'
-        cond_giampa_logis = df_dist_merged['TRANSPORTE_NORM'].isin(['GIAMPAOLETTI BUOSI S.A.', 'LOGISCHER NEA SA'])
+        cond_giampa_logis = df_dist_merged['TRANSPORTE_NORM'].isin([
+            'GIAMPAOLETTI BUOSI S.A.',
+            'LOGISCHER NEA SA',
+            'TTES. LOS AMIGOS S.A.'
+        ])
         cond_peso_valido = df_dist_merged['Gross weight'].notna() & (df_dist_merged['Gross weight'] > 0)
         conditions = [
             cond_peso_valido & cond_andreani & (df_dist_merged['Gross weight'] <= 900),
@@ -617,7 +650,7 @@ tipos_simples = ['Simple', 'Dos Puntos', 'Exportación', 'Alcance', 'Retiro']
 tipos_distribucion = ['Distribución - Troncal', 'Alcance - Distribución']
 # Normalizar columnas de transporte del archivo de viajes.
 df_viajes_trafico = preparar_columnas_transporte_viajes(df_viajes_trafico)
-transporte_base = df_viajes_trafico['TRANSPORTE_ALCANCE'].astype(str).str.strip()
+transporte_base = df_viajes_trafico['TRANSPORTE_ALCANCE'].apply(normalizar_transportista)
 df = df_viajes_trafico[transporte_base.isin(transportes_correctos)].copy()
 df['ID_VIAJES'] = df['N DE VIAJE'].astype(str).str.split(',').str[0].str.split('&').str[0].str.strip()
 df['T_VIAJE'] = clasificar_t_viaje_vectorizado(df)
